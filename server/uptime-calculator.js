@@ -717,8 +717,12 @@ class UptimeCalculator {
             }
 
             if (data) {
-                data.timestamp = key;
-                result.push(data);
+                // Copy the data, so the cached data object is not mutated
+                // when the chart output normalizes it later
+                result.push({
+                    ...data,
+                    timestamp: key,
+                });
             }
 
             // Set key to the previous time period
@@ -738,6 +742,60 @@ class UptimeCalculator {
         }
 
         return result;
+    }
+
+    /**
+     * Get pre-aggregated chart buckets for a given period in hours.
+     * Maps the period to one of the three aggregation levels:
+     * - up to 24 hours: minute buckets (max 1440 points)
+     * - up to 30 days: hourly buckets (max 720 points)
+     * - up to 1 year: daily buckets (max 365 points)
+     *
+     * Each bucket contains:
+     * - timestamp: bucket start time in milliseconds (UTC)
+     * - up/down: number of up/down beats in the bucket
+     * - avgPing/minPing/maxPing: null when the bucket has no up beats
+     * @param {number} periodHrs Period in hours from now
+     * @returns {Array<ChartDataPoint>} Aggregated chart buckets, oldest first
+     * @throws {Error} Invalid period
+     */
+    getChartData(periodHrs) {
+        const period = Number(periodHrs);
+
+        if (! Number.isFinite(period) || period <= 0) {
+            throw new Error("Invalid period.");
+        }
+
+        let type;
+        let num;
+
+        if (period <= 24) {
+            type = "minute";
+            num = Math.min(Math.ceil(period * 60), 24 * 60);
+        } else if (period <= 30 * 24) {
+            type = "hour";
+            num = Math.ceil(period);
+        } else if (period <= 365 * 24) {
+            type = "day";
+            num = Math.ceil(period / 24);
+        } else {
+            throw new Error("The maximum period is 1 year (8760 hours).");
+        }
+
+        // getDataArray walks backwards from the current bucket, so its
+        // result is newest-first; the chart expects chronological order.
+        // It also only returns buckets that contain data (sparse output).
+        // Timestamps are in seconds, the chart needs milliseconds and
+        // null pings for buckets without any up beats.
+        return this.getDataArray(num, type).reverse().map((data) => ({
+            timestamp: data.timestamp * 1000,
+            up: data.up,
+            down: data.down,
+            avgPing: data.up > 0 ? data.avgPing : null,
+            minPing: data.up > 0 ? data.minPing : null,
+            maxPing: data.up > 0 ? data.maxPing : null,
+            ...(data.maintenance ? { maintenance: data.maintenance } : {}),
+        }));
     }
 
     /**

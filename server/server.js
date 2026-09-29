@@ -144,6 +144,7 @@ const { dockerSocketHandler } = require("./socket-handlers/docker-socket-handler
 const { maintenanceSocketHandler } = require("./socket-handlers/maintenance-socket-handler");
 const { apiKeySocketHandler } = require("./socket-handlers/api-key-socket-handler");
 const { generalSocketHandler } = require("./socket-handlers/general-socket-handler");
+const { chartSocketHandler } = require("./socket-handlers/chart-socket-handler");
 const { Settings } = require("./settings");
 const apicache = require("./modules/apicache");
 const { resetChrome } = require("./monitor-types/real-browser-monitor-type");
@@ -903,41 +904,6 @@ let needSetup = false;
             }
         });
 
-        socket.on("getMonitorBeats", async (monitorID, period, callback) => {
-            try {
-                checkLogin(socket);
-
-                log.info("monitor", `Get Monitor Beats: ${monitorID} User ID: ${socket.userID}`);
-
-                if (period == null) {
-                    throw new Error("Invalid period.");
-                }
-
-                const sqlHourOffset = Database.sqlHourOffset();
-
-                let list = await R.getAll(`
-                    SELECT *
-                    FROM heartbeat
-                    WHERE monitor_id = ?
-                      AND time > ${sqlHourOffset}
-                    ORDER BY time ASC
-                `, [
-                    monitorID,
-                    -period,
-                ]);
-
-                callback({
-                    ok: true,
-                    data: list,
-                });
-            } catch (e) {
-                callback({
-                    ok: false,
-                    msg: e.message,
-                });
-            }
-        });
-
         // Start or Resume the monitor
         socket.on("resumeMonitor", async (monitorID, callback) => {
             try {
@@ -1528,6 +1494,7 @@ let needSetup = false;
         apiKeySocketHandler(socket);
         remoteBrowserSocketHandler(socket);
         generalSocketHandler(socket, server);
+        chartSocketHandler(socket);
 
         log.debug("server", "added all socket handlers");
 

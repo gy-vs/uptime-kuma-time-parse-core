@@ -664,14 +664,16 @@ export default {
         },
 
         /**
-         * Get monitor beats for a specific monitor in a time range
+         * Get pre-aggregated chart data for a specific monitor
+         * Server returns minute/hour/day buckets with timestamp, up, down,
+         * avgPing, minPing and maxPing
          * @param {number} monitorID ID of monitor to fetch
-         * @param {number} period Time in hours from now
+         * @param {number} periodHrs Time in hours from now
          * @param {socketCB} callback Callback for socket response
          * @returns {void}
          */
-        getMonitorBeats(monitorID, period, callback) {
-            socket.emit("getMonitorBeats", monitorID, period, callback);
+        getMonitorChartData(monitorID, periodHrs, callback) {
+            socket.emit("getMonitorChartData", monitorID, periodHrs, callback);
         },
     },
 

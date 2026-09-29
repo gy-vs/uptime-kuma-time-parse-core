@@ -96,6 +96,63 @@ export default {
             }
             return "";
         },
+
+        /**
+         * Select the time scale configuration for a chart period.
+         * Short periods show per-minute ticks, weekly/monthly periods
+         * per-hour ticks and the yearly period per-day ticks.
+         * @param {number} periodHrs Selected chart period in hours (0 = recent)
+         * @returns {{minUnit: string, round: string, tooltipFormat: string, tickFormat: string}} Scale time config
+         */
+        chartTimeScaleConfig(periodHrs) {
+            // Recent / up to 24h: minute buckets
+            if (periodHrs === 0 || periodHrs <= 24) {
+                return {
+                    minUnit: "minute",
+                    round: "second",
+                    tooltipFormat: "YYYY-MM-DD HH:mm:ss",
+                    tickFormat: "HH:mm",
+                };
+            }
+
+            // Up to 30 days: hour buckets
+            if (periodHrs <= 30 * 24) {
+                return {
+                    minUnit: "hour",
+                    round: "hour",
+                    tooltipFormat: "YYYY-MM-DD HH:mm",
+                    tickFormat: "MM-DD HH:mm",
+                };
+            }
+
+            // Up to 1 year: day buckets
+            return {
+                minUnit: "day",
+                round: "day",
+                tooltipFormat: "YYYY-MM-DD",
+                tickFormat: "MM-DD",
+            };
+        },
+
+        /**
+         * Format a chart time axis tick value in the user's timezone
+         * @param {number|string|Date} value Tick value (usually milliseconds)
+         * @param {number} periodHrs Selected chart period in hours (0 = recent)
+         * @returns {string} Formatted tick label
+         */
+        chartTickLabel(value, periodHrs) {
+            return this.datetimeFormat(value, this.chartTimeScaleConfig(periodHrs).tickFormat);
+        },
+
+        /**
+         * Format a chart tooltip time value in the user's timezone
+         * @param {number|string|Date} value Tooltip x value
+         * @param {number} periodHrs Selected chart period in hours (0 = recent)
+         * @returns {string} Formatted tooltip time
+         */
+        chartTooltipTime(value, periodHrs) {
+            return this.datetimeFormat(value, this.chartTimeScaleConfig(periodHrs).tooltipFormat);
+        },
     },
 
     computed: {
