@@ -372,6 +372,109 @@ function memoryUsage() {
     };
 }
 
+test("Test getChartDataType period to aggregation level mapping", async (t) => {
+    // Up to 24 hours -> minute buckets
+    assert.strictEqual(UptimeCalculator.getChartDataType(3), "minute");
+    assert.strictEqual(UptimeCalculator.getChartDataType(6), "minute");
+    assert.strictEqual(UptimeCalculator.getChartDataType(24), "minute");
+
+    // Up to 30 days -> hourly buckets
+    assert.strictEqual(UptimeCalculator.getChartDataType(25), "hour");
+    assert.strictEqual(UptimeCalculator.getChartDataType(168), "hour");
+    assert.strictEqual(UptimeCalculator.getChartDataType(720), "hour");
+
+    // Up to 1 year -> daily buckets
+    assert.strictEqual(UptimeCalculator.getChartDataType(721), "day");
+    assert.strictEqual(UptimeCalculator.getChartDataType(8760), "day");
+
+    // Numeric strings from socket payloads are accepted
+    assert.strictEqual(UptimeCalculator.getChartDataType("168"), "hour");
+
+    // Invalid inputs are rejected
+    assert.throws(() => UptimeCalculator.getChartDataType(0), /Invalid period/);
+    assert.throws(() => UptimeCalculator.getChartDataType(-1), /Invalid period/);
+    assert.throws(() => UptimeCalculator.getChartDataType(undefined), /Invalid period/);
+    assert.throws(() => UptimeCalculator.getChartDataType("abc"), /Invalid period/);
+    assert.throws(() => UptimeCalculator.getChartDataType(8761), /1 year/);
+});
+
+test("Test getChartData minutely buckets", async (t) => {
+    UptimeCalculator.currentDate = dayjs.utc("2023-08-12 20:46:59");
+    let c = new UptimeCalculator();
+
+    // No data yet -> empty buckets
+    let chartData = c.getChartData(3);
+    assert.strictEqual(chartData.type, "minute");
+    assert.strictEqual(chartData.periodHrs, 3);
+    assert.deepStrictEqual(chartData.data, []);
+
+    // Two UP beats in the current minute and a DOWN beat in the previous minute
+    UptimeCalculator.currentDate = dayjs.utc("2023-08-12 20:46:10");
+    await c.update(UP, 100);
+    UptimeCalculator.currentDate = UptimeCalculator.currentDate.add(20, "second");
+    await c.update(UP, 200);
+    UptimeCalculator.currentDate = dayjs.utc("2023-08-12 20:45:10");
+    await c.update(DOWN);
+
+    // Read the data from "now" (the latest bucket), as in production getCurrentDate()
+    UptimeCalculator.currentDate = dayjs.utc("2023-08-12 20:46:59");
+    chartData = c.getChartData(3);
+    assert.strictEqual(chartData.type, "minute");
+    assert.strictEqual(chartData.data.length, 2);
+
+    // Ascending chronological order
+    let previous = chartData.data[0];
+    let current = chartData.data[1];
+    assert.strictEqual(previous.timestamp, dayjs.utc("2023-08-12 20:45:00").valueOf());
+    assert.strictEqual(current.timestamp, dayjs.utc("2023-08-12 20:46:00").valueOf());
+
+    // DOWN-only bucket: pings are null
+    assert.strictEqual(previous.up, 0);
+    assert.strictEqual(previous.down, 1);
+    assert.strictEqual(previous.avgPing, null);
+    assert.strictEqual(previous.minPing, null);
+    assert.strictEqual(previous.maxPing, null);
+
+    // UP bucket: average/min/max over the two beats
+    assert.strictEqual(current.up, 2);
+    assert.strictEqual(current.down, 0);
+    assert.strictEqual(current.avgPing, 150);
+    assert.strictEqual(current.minPing, 100);
+    assert.strictEqual(current.maxPing, 200);
+
+    // Timestamps are epoch milliseconds
+    assert.strictEqual(current.timestamp % 60000, 0);
+});
+
+test("Test getChartData hourly and daily bucket levels", async (t) => {
+    UptimeCalculator.currentDate = dayjs.utc("2023-08-12 20:46:59");
+    let c = new UptimeCalculator();
+
+    await c.update(UP, 50);
+
+    // 1 week -> hourly aggregation
+    let hourly = c.getChartData(168);
+    assert.strictEqual(hourly.type, "hour");
+    assert.strictEqual(hourly.data.length, 1);
+    assert.strictEqual(hourly.data[0].timestamp, dayjs.utc("2023-08-12 20:00:00").valueOf());
+    assert.strictEqual(hourly.data[0].avgPing, 50);
+
+    // 30 days -> hourly aggregation is still available
+    assert.strictEqual(c.getChartData(720).type, "hour");
+
+    // 1 year -> daily aggregation
+    let daily = c.getChartData(8760);
+    assert.strictEqual(daily.type, "day");
+    assert.strictEqual(daily.data.length, 1);
+    assert.strictEqual(daily.data[0].timestamp, dayjs.utc("2023-08-12 00:00:00").valueOf());
+});
+
+test("Test getChartData rejects unsupported periods", async (t) => {
+    let c = new UptimeCalculator();
+    assert.throws(() => c.getChartData(0), /Invalid period/);
+    assert.throws(() => c.getChartData(10000), /1 year/);
+});
+
 test("Worst case", async (t) => {
 
     // Disable on GitHub Actions, as it is not stable on it

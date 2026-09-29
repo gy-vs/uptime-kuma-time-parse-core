@@ -741,6 +741,131 @@ class UptimeCalculator {
     }
 
     /**
+     * Get the data array for the monitor chart.
+     * Chooses the minute/hour/day pre-aggregation level by the requested
+     * period, so long periods no longer need to stream raw heartbeats.
+     * @param {number} periodHrs Requested period in hours from now
+     * @returns {{type: ("minute"|"hour"|"day"), periodHrs: number, data: Array<ChartDataPoint>}} Chart buckets in ascending chronological order
+     * @throws {Error} Invalid period
+     * @throws {Error} The period is longer than 1 year
+     */
+    getChartData(periodHrs) {
+        let type = UptimeCalculator.getChartDataType(periodHrs);
+        let num;
+
+        switch (type) {
+            case "minute":
+                // One bucket per minute, capped by the 24-hour minutely retention
+                num = Math.min(Math.ceil(periodHrs * 60), 24 * 60);
+                break;
+            case "hour":
+                // One bucket per hour, capped by the 30-day hourly retention
+                num = Math.min(Math.ceil(periodHrs), 30 * 24);
+                break;
+            case "day":
+                // One bucket per day, capped by the 365-day daily retention
+                num = Math.min(Math.ceil(periodHrs / 24), 365);
+                break;
+            default:
+                throw new Error("Invalid type");
+        }
+
+        let currentKey = this.getKey(this.getCurrentDate(), type);
+        let bucketSize;
+
+        switch (type) {
+            case "minute":
+                bucketSize = 60;
+                break;
+            case "hour":
+                bucketSize = 3600;
+                break;
+            case "day":
+                bucketSize = 86400;
+                break;
+            default:
+                throw new Error("Invalid type");
+        }
+
+        let endTimestamp = currentKey - bucketSize * (num - 1);
+        let data = [];
+
+        // Iterate from the earliest bucket to the current one, so the
+        // loop key and the emitted bucket key never diverge
+        for (let bucketKey = endTimestamp; bucketKey <= currentKey; bucketKey += bucketSize) {
+            let bucket;
+
+            switch (type) {
+                case "day":
+                    bucket = this.dailyUptimeDataList[bucketKey];
+                    break;
+                case "hour":
+                    bucket = this.hourlyUptimeDataList[bucketKey];
+                    break;
+                case "minute":
+                    bucket = this.minutelyUptimeDataList[bucketKey];
+                    break;
+                default:
+                    throw new Error("Invalid type");
+            }
+
+            // Only emit buckets that actually contain beats. Buckets without
+            // data are left as gaps instead of zeroed/empty bars.
+            if (bucket && (bucket.up > 0 || bucket.down > 0)) {
+                // Ping is unknown until the monitor has at least one UP beat
+                let hasPing = bucket.up > 0 && !isNaN(bucket.avgPing);
+
+                data.push({
+                    timestamp: bucketKey * 1000,
+                    up: bucket.up,
+                    down: bucket.down,
+                    avgPing: hasPing ? bucket.avgPing : null,
+                    minPing: hasPing ? bucket.minPing : null,
+                    maxPing: hasPing ? bucket.maxPing : null,
+                });
+            }
+        }
+
+        return {
+            type,
+            periodHrs,
+            data,
+        };
+    }
+
+    /**
+     * Map a chart period (in hours) to the matching pre-aggregation level.
+     * - up to 24 hours: minute buckets (24-hour minutely retention)
+     * - up to 30 days: hourly buckets (30-day hourly retention)
+     * - up to 1 year: daily buckets (365-day daily retention)
+     * @param {number} periodHrs Requested period in hours from now
+     * @returns {"minute" | "hour" | "day"} Aggregation level
+     * @throws {Error} Invalid period
+     * @throws {Error} The period is longer than 1 year
+     */
+    static getChartDataType(periodHrs) {
+        let period = Number(periodHrs);
+
+        if (!Number.isFinite(period) || period <= 0) {
+            throw new Error("Invalid period.");
+        }
+
+        if (period <= 24) {
+            return "minute";
+        }
+
+        if (period <= 30 * 24) {
+            return "hour";
+        }
+
+        if (period <= 365 * 24) {
+            return "day";
+        }
+
+        throw new Error("The maximum chart period is 1 year.");
+    }
+
+    /**
      * Get the uptime data by duration
      * @param {'24h'|'30d'|'1y'} duration Only accept 24h, 30d, 1y
      * @returns {UptimeDataResult} UptimeDataResult

@@ -673,6 +673,19 @@ export default {
         getMonitorBeats(monitorID, period, callback) {
             socket.emit("getMonitorBeats", monitorID, period, callback);
         },
+
+        /**
+         * Get pre-aggregated chart buckets (minute/hour/day) for a specific monitor
+         * @param {number} monitorID ID of monitor to fetch
+         * @param {number} periodHrs Time range in hours from now
+         * @param {socketCB} callback Callback for socket response, `data` is an
+         * array of {timestamp, up, down, avgPing, minPing, maxPing} buckets and
+         * `type` is the aggregation level ("minute" | "hour" | "day")
+         * @returns {void}
+         */
+        getMonitorChartData(monitorID, periodHrs, callback) {
+            socket.emit("getMonitorChartData", monitorID, periodHrs, callback);
+        },
     },
 
     computed: {

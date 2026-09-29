@@ -6,7 +6,7 @@
             </button>
             <ul class="dropdown-menu dropdown-menu-end">
                 <li v-for="(item, key) in chartPeriodOptions" :key="key">
-                    <a class="dropdown-item" :class="{ active: chartPeriodHrs == key }" href="#" @click="chartPeriodHrs = key">{{ item }}</a>
+                    <a class="dropdown-item" :class="{ active: chartPeriodHrs == key }" href="#" @click.prevent="changePeriod(Number(key))">{{ item }}</a>
                 </li>
             </ul>
         </div>
@@ -21,7 +21,7 @@ import { BarController, BarElement, Chart, Filler, LinearScale, LineController, 
 import "chartjs-adapter-dayjs-4";
 import dayjs from "dayjs";
 import { Line } from "vue-chartjs";
-import { DOWN, PENDING, MAINTENANCE, log } from "../util.ts";
+import { DOWN, PENDING, MAINTENANCE } from "../util.ts";
 
 Chart.register(LineController, BarController, LineElement, PointElement, TimeScale, BarElement, LinearScale, Tooltip, Filler);
 
@@ -39,7 +39,8 @@ export default {
 
             loading: false,
 
-            // Configurable filtering on top of the returned data
+            // 0 = live "Recent" heartbeat feed; otherwise hours requested
+            // from the server-side aggregation (getMonitorChartData)
             chartPeriodHrs: 0,
 
             chartPeriodOptions: {
@@ -48,14 +49,26 @@ export default {
                 6: "6h",
                 24: "24h",
                 168: "1w",
+                720: "30d",
+                8760: "1y",
             },
 
-            // A heartbeatList for 3h, 6h, 24h, 1w
-            // Uses the $root.heartbeatList when value is null
-            heartbeatList: null
+            // Pre-aggregated buckets for the selected non-recent period
+            // Each item: {timestamp, up, down, avgPing, minPing, maxPing}
+            chartBucketList: [],
+
+            // Aggregation level returned by the server: "minute" | "hour" | "day"
+            chartBucketType: "minute",
+
+            // Used to discard responses of superseded period requests
+            chartRequestId: 0,
         };
     },
     computed: {
+        isLiveChart() {
+            return this.chartPeriodHrs === 0;
+        },
+
         chartOptions() {
             return {
                 responsive: true,
@@ -91,15 +104,7 @@ export default {
                 scales: {
                     x: {
                         type: "time",
-                        time: {
-                            minUnit: "minute",
-                            round: "second",
-                            tooltipFormat: "YYYY-MM-DD HH:mm:ss",
-                            displayFormats: {
-                                minute: "HH:mm",
-                                hour: "MM-DD HH:mm",
-                            }
-                        },
+                        time: this.chartTimeScaleOption(this.isLiveChart ? "recent" : this.chartBucketType),
                         ticks: {
                             sampleSize: 3,
                             maxRotation: 0,
@@ -128,7 +133,9 @@ export default {
                             drawOnChartArea: false,
                         },
                         min: 0,
-                        max: 1,
+                        // Aggregated buckets stack the up and down bars
+                        max: this.isLiveChart ? 1 : 2,
+                        stacked: !this.isLiveChart,
                         offset: false,
                     },
                 },
@@ -142,11 +149,15 @@ export default {
                         bodyColor: this.$root.theme === "light" ? "rgba(12,12,18,1.0)" : "rgba(220,220,220,1.0)",
                         titleColor: this.$root.theme === "light" ? "rgba(12,12,18,1.0)" : "rgba(220,220,220,1.0)",
                         filter: function (tooltipItem) {
-                            return tooltipItem.datasetIndex === 0;  // Hide tooltip on Bar Chart
+                            // Hide tooltip on the status bar datasets (index 3+)
+                            return tooltipItem.datasetIndex < 3;
                         },
                         callbacks: {
                             label: (context) => {
-                                return ` ${new Intl.NumberFormat().format(context.parsed.y)} ms`;
+                                if (context.parsed.y === null) {
+                                    return null;
+                                }
+                                return ` ${context.dataset.label} ${new Intl.NumberFormat().format(context.parsed.y)} ms`;
                             },
                         }
                     },
@@ -157,20 +168,96 @@ export default {
             };
         },
         chartData() {
+            if (this.isLiveChart) {
+                return this.getLiveChartData();
+            }
+
+            return this.getAggregatedChartData();
+        },
+    },
+    created() {
+        // Restore the saved chart period for this monitor. Invalid/legacy
+        // values fall back to the live feed instead of triggering a bad
+        // server request.
+        let period = Number(this.$root.storage()[`chart-period-${this.monitorId}`]);
+
+        if (period > 0 && Object.prototype.hasOwnProperty.call(this.chartPeriodOptions, period)) {
+            this.chartPeriodHrs = period;
+            this.fetchChartData(period);
+        }
+    },
+    methods: {
+        /**
+         * Switch the chart period. Period 0 keeps the live heartbeat feed,
+         * other periods are fetched as server-side aggregated buckets.
+         * @param {number} newPeriod Period in hours (0 = Recent)
+         * @returns {void}
+         */
+        changePeriod(newPeriod) {
+            if (newPeriod === this.chartPeriodHrs) {
+                return;
+            }
+
+            this.chartPeriodHrs = newPeriod;
+
+            if (newPeriod === 0) {
+                // Back to the live feed: drop the aggregated snapshot
+                this.chartBucketList = [];
+                this.$root.storage().removeItem(`chart-period-${this.monitorId}`);
+            } else {
+                this.$root.storage()[`chart-period-${this.monitorId}`] = newPeriod;
+                this.fetchChartData(newPeriod);
+            }
+        },
+
+        /**
+         * Request aggregated chart buckets from the server.
+         * A per-request id makes sure only the latest response is accepted,
+         * so quickly switching periods cannot overwrite the current view.
+         * @param {number} periodHrs Period in hours
+         * @returns {void}
+         */
+        fetchChartData(periodHrs) {
+            let requestId = ++this.chartRequestId;
+            this.loading = true;
+
+            this.$root.getMonitorChartData(this.monitorId, periodHrs, (res) => {
+                // A newer period was selected while this request was in flight
+                if (requestId !== this.chartRequestId) {
+                    return;
+                }
+
+                this.loading = false;
+
+                if (!res.ok) {
+                    this.chartBucketList = [];
+                    this.$root.toastError(res.msg);
+                } else {
+                    this.chartBucketType = res.type;
+                    this.chartBucketList = res.data;
+                }
+            });
+        },
+
+        /**
+         * Build the chart datasets for the live "Recent" heartbeat feed.
+         * Reads $root.heartbeatList directly, so every new "heartbeat" socket
+         * event updates the chart incrementally via reactivity.
+         * @returns {object} chart.js data
+         */
+        getLiveChartData() {
             let pingData = [];  // Ping Data for Line Chart, y-axis contains ping time
             let downData = [];  // Down Data for Bar Chart, y-axis is 1 if target is down (red color), under maintenance (blue color) or pending (orange color), 0 if target is up
             let colorData = []; // Color Data for Bar Chart
 
-            let heartbeatList = this.heartbeatList ||
-             (this.monitorId in this.$root.heartbeatList && this.$root.heartbeatList[this.monitorId]) ||
-             [];
+            let heartbeatList = (this.monitorId in this.$root.heartbeatList && this.$root.heartbeatList[this.monitorId]) || [];
 
             heartbeatList
                 .filter(
                     // Filtering as data gets appended
                     // not the most efficient, but works for now
                     (beat) => dayjs.utc(beat.time).tz(this.$root.timezone).isAfter(
-                        dayjs().subtract(Math.max(this.chartPeriodHrs, 6), "hours")
+                        dayjs().subtract(6, "hours")
                     )
                 )
                 .map((beat) => {
@@ -199,6 +286,18 @@ export default {
                         label: "ping",
                     },
                     {
+                        // Hidden placeholder datasets so the bar datasets keep
+                        // the same indexes (3/4) as in the aggregated chart
+                        data: [],
+                        yAxisID: "y",
+                        label: "min",
+                    },
+                    {
+                        data: [],
+                        yAxisID: "y",
+                        label: "max",
+                    },
+                    {
                         // Bar Chart
                         type: "bar",
                         data: downData,
@@ -214,54 +313,112 @@ export default {
                 ],
             };
         },
-    },
-    watch: {
-        // Update chart data when the selected chart period changes
-        chartPeriodHrs: function (newPeriod) {
 
-            // eslint-disable-next-line eqeqeq
-            if (newPeriod == "0") {
-                this.heartbeatList = null;
-                this.$root.storage().removeItem(`chart-period-${this.monitorId}`);
-            } else {
-                this.loading = true;
+        /**
+         * Build the chart datasets from server-side aggregated buckets.
+         * Three line datasets (avg/min/max ping) plus stacked up/down bars.
+         * @returns {object} chart.js data
+         */
+        getAggregatedChartData() {
+            let avgPingData = [];
+            let minPingData = [];
+            let maxPingData = [];
+            let upData = [];
+            let downData = [];
 
-                this.$root.getMonitorBeats(this.monitorId, newPeriod, (res) => {
-                    if (!res.ok) {
-                        this.$root.toastError(res.msg);
-                    } else {
-                        this.heartbeatList = res.data;
-                        this.$root.storage()[`chart-period-${this.monitorId}`] = newPeriod;
+            for (let bucket of this.chartBucketList) {
+                // Bucket timestamps are epoch milliseconds; format them in
+                // the selected local timezone, same as the live heartbeat path
+                const x = this.$root.datetime(bucket.timestamp);
+
+                avgPingData.push({ x,
+                    y: bucket.avgPing });
+                minPingData.push({ x,
+                    y: bucket.minPing });
+                maxPingData.push({ x,
+                    y: bucket.maxPing });
+
+                // Stacked bars on y1 (max 2): down at the bottom, up on top
+                if (bucket.down > 0) {
+                    downData.push({ x,
+                        y: 1 });
+                    if (bucket.up > 0) {
+                        upData.push({ x,
+                            y: 1 });
                     }
-                    this.loading = false;
-                });
-            }
-        }
-    },
-    created() {
-        // Setup Watcher on the root heartbeatList,
-        // And mirror latest change to this.heartbeatList
-        this.$watch(() => this.$root.heartbeatList[this.monitorId],
-            (heartbeatList) => {
-
-                log.debug("ping_chart", `this.chartPeriodHrs type ${typeof this.chartPeriodHrs}, value: ${this.chartPeriodHrs}`);
-
-                // eslint-disable-next-line eqeqeq
-                if (this.chartPeriodHrs != "0") {
-                    const newBeat = heartbeatList.at(-1);
-                    if (newBeat && dayjs.utc(newBeat.time) > dayjs.utc(this.heartbeatList.at(-1)?.time)) {
-                        this.heartbeatList.push(heartbeatList.at(-1));
-                    }
+                } else if (bucket.up > 0) {
+                    downData.push({ x,
+                        y: 0 });
+                    upData.push({ x,
+                        y: 1 });
                 }
-            },
-            { deep: true }
-        );
+            }
 
-        // Load chart period from storage if saved
-        let period = this.$root.storage()[`chart-period-${this.monitorId}`];
-        if (period != null) {
-            this.chartPeriodHrs = Math.min(period, 6);
-        }
+            return {
+                datasets: [
+                    {
+                        // Average ping line
+                        data: avgPingData,
+                        fill: "origin",
+                        tension: 0.2,
+                        borderColor: "#5CDD8B",
+                        backgroundColor: "#5CDD8B38",
+                        yAxisID: "y",
+                        label: "avg",
+                    },
+                    {
+                        // Minimum ping line
+                        data: minPingData,
+                        fill: false,
+                        tension: 0.2,
+                        borderColor: "#3FAE6E",
+                        borderDash: [ 4, 3 ],
+                        pointRadius: 0,
+                        yAxisID: "y",
+                        label: "min",
+                    },
+                    {
+                        // Maximum ping line
+                        data: maxPingData,
+                        fill: false,
+                        tension: 0.2,
+                        borderColor: "#8BE8B0",
+                        borderDash: [ 4, 3 ],
+                        pointRadius: 0,
+                        yAxisID: "y",
+                        label: "max",
+                    },
+                    {
+                        // Down part of the status bar (red)
+                        type: "bar",
+                        data: downData,
+                        stack: "status",
+                        borderColor: "#00000000",
+                        backgroundColor: "#DC354568",
+                        yAxisID: "y1",
+                        barThickness: "flex",
+                        barPercentage: 1,
+                        categoryPercentage: 1,
+                        inflateAmount: 0.05,
+                        label: "down",
+                    },
+                    {
+                        // Up part of the status bar (green)
+                        type: "bar",
+                        data: upData,
+                        stack: "status",
+                        borderColor: "#00000000",
+                        backgroundColor: "rgba(92,221,139,0.35)",
+                        yAxisID: "y1",
+                        barThickness: "flex",
+                        barPercentage: 1,
+                        categoryPercentage: 1,
+                        inflateAmount: 0.05,
+                        label: "up",
+                    },
+                ],
+            };
+        },
     }
 };
 </script>
